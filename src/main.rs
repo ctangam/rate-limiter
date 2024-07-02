@@ -66,6 +66,12 @@ impl Storage for Bucket {
     }
 }
 
+pub struct FixedWindow {
+    pub duration: u64,
+    pub threshold: usize,
+    pub inner: Arc<Mutex<HashMap<String, (Instant, usize)>>>
+}
+
 #[tokio::main]
 async fn main() {
     let storage = Bucket::new(11);
