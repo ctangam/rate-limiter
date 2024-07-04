@@ -8,6 +8,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::limiter::Limiter;
 use anyhow::{Error, Result};
+use approximation::Approximation;
 use axum::{
     extract::{Query, State},
     http::StatusCode,
@@ -20,7 +21,7 @@ use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() {
-    let shared_state = SlidingWindow::init(20, 11);
+    let shared_state = Approximation::init(60, 10);
 
     let app = Router::new()
         .route("/limited", get(limited))
@@ -32,7 +33,7 @@ async fn main() {
 }
 
 async fn limited(
-    State(state): State<Arc<SlidingWindow>>,
+    State(state): State<Arc<Approximation>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> (StatusCode, &'static str) {
     let key = params.get("id").unwrap();

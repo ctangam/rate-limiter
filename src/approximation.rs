@@ -1,77 +1,110 @@
-use std::{collections::HashMap, sync::{Arc, Mutex}, time::Duration};
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
-use chrono::{Duration as ChronoDuration, DurationRound, NaiveTime, TimeDelta, Timelike};
-use tokio::time::Instant;
+use anyhow::{Error, Result};
+use chrono::{prelude::*, DurationRound, TimeDelta};
+use tokio::time::{self, Instant};
 
 use crate::limiter::Limiter;
 
-pub struct Approximation {
-    pub duration: u64,
-    pub threshold: usize,
-    pub inner: Arc<Mutex<HashMap<String, Entry>>>,
-    
+pub struct Entry {
+    pub hits: BTreeSet<DateTime<Local>>,
 }
 
-pub struct Entry {
-    pub pre_count: usize,
-    pub cur_count: usize,
+pub struct Approximation {
+    pub duration: u32,
+    pub threshold: usize,
+    pub inner: Arc<Mutex<HashMap<String, Entry>>>,
+}
+
+impl Approximation {
+    pub fn init(duration: u32, threshold: usize) -> Arc<Self> {
+        let window = Self {
+            duration,
+            threshold,
+            inner: Arc::new(Mutex::new(HashMap::new())),
+        };
+
+        let shared_state = Arc::new(window);
+        let state = shared_state.clone();
+        tokio::spawn(async move {
+            let mut interval = time::interval(time::Duration::from_secs(state.duration as u64));
+            loop {
+                interval.tick().await;
+
+                println!("purge outdated hits");
+                state.rearm();
+            }
+        });
+
+        shared_state
+    }
 }
 
 impl Limiter for Approximation {
-    fn consume(&self, key: &str) -> anyhow::Result<usize, anyhow::Error> {
-        let window = self.inner.lock().unwrap();
+    fn consume(&self, key: &str) -> Result<usize, Error> {
+        let mut window = self.inner.lock().unwrap();
+        let entry = window.entry(key.to_string()).or_insert(Entry {
+            hits: BTreeSet::new(),
+        });
 
-        let entry = window.get(key).unwrap();
-        let now = Instant::now();
+        let now = Local::now();
+        let left = now
+            .checked_sub_signed(TimeDelta::seconds(self.duration as i64))
+            .unwrap();
+        let (prev_start, prev_end) = nearest_minute(left);
+        let prev_weight = 1.0 - now.second() as f64 / self.duration as f64;
+        let mut prev_count = 0;
+        let mut cur_count = 0;
+        for hit in &entry.hits {
+            if prev_start <= *hit && *hit < prev_end {
+                prev_count += 1;
+            } else if *hit >= prev_end {
+                cur_count += 1;
+            }
+        }
+        println!("prev_weight: {prev_weight}, prev_count: {prev_count}, cur_count: {cur_count}");
         
-        Ok(0)
+        let approximation = prev_count as f64 * prev_weight + cur_count as f64;
+        let remained = self.threshold - approximation as usize;
+        println!("calc hits: {approximation}, remained: {remained}");
+        
+        if remained <= 0 {
+            return Err(Error::msg("No more tokens"));
+        }
+
+        entry.hits.insert(now);
+
+        Ok(remained - 1)
     }
 
     fn rearm(&self) -> Option<tokio::time::Instant> {
-        todo!()
+        let mut window = self.inner.lock().unwrap();
+        let now = Local::now();
+        let left = now
+            .checked_sub_signed(TimeDelta::seconds(self.duration as i64))
+            .unwrap();
+        println!("ddl: {left}");
+        window.retain(|key, entry| {
+            println!("{key} before clean: {:?}", entry.hits);
+            entry.hits.retain(|hit| *hit >= left);
+            println!("{key} after clean: {:?}", entry.hits);
+
+            !entry.hits.is_empty()
+        });
+
+        None
     }
 }
 
-// fn nearest_time() -> (Instant, Instant) {
-//     use chrono::prelude::*;
+fn nearest_minute(when: DateTime<Local>) -> (DateTime<Local>, DateTime<Local>) {
+    let minute_start = when.duration_trunc(TimeDelta::minutes(1)).unwrap();
+    let minute_end = minute_start
+        .checked_add_signed(TimeDelta::minutes(1))
+        .unwrap();
 
-//     let local: DateTime<Local> = Local::now();
-//     local.duration_round(TimeDelta::minutes(1));
-    
-//     // 将持续时间转换为秒数
-//     let total_seconds = since_epoch.as_secs();
-    
-//     // 计算当前时间在当天的秒数
-//     let seconds_in_day = total_seconds % 86400;
-    
-//     // 将秒数转换为 NaiveTime
-//     let current_time = NaiveTime::from_num_seconds_from_midnight_opt(seconds_in_day as u32, 0).unwrap();
-    
-//     // 计算当前时间的整分钟边界点
-//     let minute_start_time = current_time.with_second(0).unwrap();
-//     let minute_end_time = minute_start_time + ChronoDuration::minutes(1);
-    
-//     // 打印时间
-//     println!("当前时间: {}", current_time);
-//     println!("整分钟起始点: {}", minute_start_time);
-//     println!("整分钟结束点: {}", minute_end_time);
-
-//     // 计算边界点相对于当前时间点的偏移量
-//     let minute_start_offset = (minute_start_time.num_seconds_from_midnight() as i64 - current_time.num_seconds_from_midnight() as i64) * 1_000_000_000;
-//     let minute_end_offset = (minute_end_time.num_seconds_from_midnight() as i64 - current_time.num_seconds_from_midnight() as i64) * 1_000_000_000;
-
-//     // 获取边界点的 Instant
-//     let minute_start = now - Duration::from_nanos(minute_start_offset as u64);
-//     let minute_end = now + Duration::from_nanos(minute_end_offset as u64);
-
-//     (minute_start, minute_end)
-// }
-
-#[test]
-fn test_nearest() {
-    use chrono::prelude::*;
-
-    let local: DateTime<Local> = Local::now();
-    local.duration_round(TimeDelta::minutes(1));
-
+    (minute_start, minute_end)
 }

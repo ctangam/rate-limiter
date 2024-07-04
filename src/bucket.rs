@@ -27,12 +27,12 @@ impl Bucket {
             loop {
                 if let Some(when) = state.rearm() {
                     println!("sleep until {}", when.duration_since(Instant::now()).as_secs());
-                    time::sleep_until(when);
+                    time::sleep_until(when).await;
                 }
             }
         });
 
-        shared_state.clone()
+        shared_state
     }
 }
 
